@@ -1,42 +1,321 @@
-import socket, os, subprocess, pyautogui, cv2, pickle, struct
-from PIL import ImageGrab
+"""
+СЕРВЕР — запускать на каждом управляемом ПК
+Установка: pip install pillow pyautogui opencv-python
+Запуск:    python server.py
+"""
 
-def start_client():
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.connect(('IP_СЕРВЕРА', 9999)) # Укажите IP сервера
+import socket, threading, struct, json, base64, io, os
+import subprocess, sys, time, traceback, platform
+
+try:
+    from PIL import ImageGrab, Image
+    PIL_OK = True
+except ImportError:
+    PIL_OK = False
+
+try:
+    import pyautogui
+    pyautogui.FAILSAFE = False
+    PAG_OK = True
+except ImportError:
+    PAG_OK = False
+
+try:
+    import cv2
+    CV2_OK = True
+except ImportError:
+    CV2_OK = False
+
+HOST     = "0.0.0.0"
+PORT     = 9000
+PASSWORD = "secret123"
+
+
+def send_msg(sock, obj):
+    raw = json.dumps(obj, ensure_ascii=False).encode()
+    sock.sendall(struct.pack(">I", len(raw)) + raw)
+
+def recv_msg(sock):
+    h = _exact(sock, 4)
+    if h is None: return None
+    body = _exact(sock, struct.unpack(">I", h)[0])
+    return json.loads(body.decode()) if body else None
+
+def _exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        try: c = sock.recv(n - len(buf))
+        except OSError: return None
+        if not c: return None
+        buf += c
+    return buf
+
+
+class ScreenStreamer(threading.Thread):
+    QUALITY = {
+        "low":  {"scale": 0.40, "q": 25},
+        "high": {"scale": 0.85, "q": 75},
+    }
+    def __init__(self, sock, quality="low"):
+        super().__init__(daemon=True)
+        self.sock = sock; self.running = True; self.quality = quality
+
+    def set_quality(self, q): self.quality = q
+
+    def run(self):
+        while self.running:
+            try:
+                if not PIL_OK: time.sleep(1); continue
+                cfg = self.QUALITY.get(self.quality, self.QUALITY["low"])
+                img = ImageGrab.grab()
+                w = max(1, int(img.width * cfg["scale"]))
+                h = max(1, int(img.height * cfg["scale"]))
+                img = img.resize((w, h), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, "JPEG", quality=cfg["q"])
+                send_msg(self.sock, {"type": "screen_frame",
+                                     "data": base64.b64encode(buf.getvalue()).decode(),
+                                     "w": w, "h": h})
+                time.sleep(1 / (8 if self.quality == "high" else 15))
+            except Exception: break
+
+    def stop(self): self.running = False
+
+
+class CameraStreamer(threading.Thread):
+    def __init__(self, sock):
+        super().__init__(daemon=True)
+        self.sock = sock; self.running = True
+
+    def run(self):
+        if not CV2_OK:
+            send_msg(self.sock, {"type": "error", "msg": "opencv не установлен"}); return
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            send_msg(self.sock, {"type": "error", "msg": "Камера не найдена"}); return
+        while self.running:
+            try:
+                ret, frame = cap.read()
+                if not ret: break
+                _, jpg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 55])
+                send_msg(self.sock, {"type": "camera_frame",
+                                     "data": base64.b64encode(jpg.tobytes()).decode()})
+                time.sleep(1 / 15)
+            except Exception: break
+        cap.release()
+
+    def stop(self): self.running = False
+
+
+class ClientHandler(threading.Thread):
+    def __init__(self, sock, addr):
+        super().__init__(daemon=True)
+        self.sock = sock; self.addr = addr
+        self.screen_st = None; self.camera_st = None
+
+    def run(self):
+        print(f"[+] {self.addr}")
+        try:
+            msg = recv_msg(self.sock)
+            if not msg or msg.get("password") != PASSWORD:
+                send_msg(self.sock, {"type": "auth", "ok": False}); return
+            send_msg(self.sock, {"type": "auth", "ok": True,
+                                  "name": platform.node(),
+                                  "os": platform.platform()})
+            print(f"[✓] Авторизован {self.addr}")
+            while True:
+                msg = recv_msg(self.sock)
+                if msg is None: break
+                self._handle(msg)
+        except Exception as e:
+            print(f"[!] {e}")
+        finally:
+            self._stop_all()
+            self.sock.close()
+            print(f"[-] {self.addr}")
+
+    def _handle(self, msg):
+        t = msg.get("type")
+
+        if t == "screen_start":
+            self._stop_screen()
+            self.screen_st = ScreenStreamer(self.sock, msg.get("quality", "low"))
+            self.screen_st.start()
+        elif t == "screen_stop":
+            self._stop_screen()
+        elif t == "set_quality":
+            if self.screen_st: self.screen_st.set_quality(msg.get("quality", "low"))
+
+        elif t == "camera_start":
+            self._stop_camera()
+            self.camera_st = CameraStreamer(self.sock)
+            self.camera_st.start()
+        elif t == "camera_stop":
+            self._stop_camera()
+
+        elif t == "mouse_move" and PAG_OK:
+            sw, sh = pyautogui.size()
+            pyautogui.moveTo(int(msg["rx"]*sw), int(msg["ry"]*sh), _pause=False)
+        elif t == "mouse_down" and PAG_OK:
+            sw, sh = pyautogui.size()
+            pyautogui.mouseDown(int(msg["rx"]*sw), int(msg["ry"]*sh),
+                                button=msg.get("button","left"), _pause=False)
+        elif t == "mouse_up" and PAG_OK:
+            sw, sh = pyautogui.size()
+            pyautogui.mouseUp(int(msg["rx"]*sw), int(msg["ry"]*sh),
+                              button=msg.get("button","left"), _pause=False)
+        elif t == "mouse_click" and PAG_OK:
+            sw, sh = pyautogui.size()
+            x, y = int(msg["rx"]*sw), int(msg["ry"]*sh)
+            if msg.get("double"):
+                pyautogui.doubleClick(x, y, button=msg.get("button","left"), _pause=False)
+            else:
+                pyautogui.click(x, y, button=msg.get("button","left"), _pause=False)
+        elif t == "mouse_scroll" and PAG_OK:
+            pyautogui.scroll(msg.get("delta", 3), _pause=False)
+
+        elif t == "key_down" and PAG_OK:
+            try: pyautogui.keyDown(msg.get("key",""), _pause=False)
+            except: pass
+        elif t == "key_up" and PAG_OK:
+            try: pyautogui.keyUp(msg.get("key",""), _pause=False)
+            except: pass
+        elif t == "key_press" and PAG_OK:
+            try: pyautogui.press(msg.get("key",""), _pause=False)
+            except: pass
+        elif t == "hotkey" and PAG_OK:
+            try: pyautogui.hotkey(*msg.get("keys",[]), _pause=False)
+            except: pass
+        elif t == "type_text" and PAG_OK:
+            text = msg.get("text","")
+            if text:
+                try: pyautogui.typewrite(text, interval=0.01, _pause=False)
+                except: pass
+
+        elif t == "exec_python":
+            result = self._exec_python(msg.get("code",""))
+            send_msg(self.sock, {"type": "exec_result", "result": result})
+
+        elif t == "exec_cmd":
+            result = self._exec_cmd(msg.get("command",""))
+            send_msg(self.sock, {"type": "cmd_result", "result": result})
+
+        elif t == "file_list":
+            path = msg.get("path", os.path.expanduser("~"))
+            items = self._file_list(path)
+            send_msg(self.sock, {"type": "file_list", "items": items, "path": path})
+
+        elif t == "file_read":
+            data, err = self._file_read(msg.get("path",""))
+            send_msg(self.sock, {"type": "file_read", "path": msg.get("path",""),
+                                 "data": data, "error": err})
+
+        elif t == "file_write":
+            err = self._file_write(msg.get("path",""), msg.get("data",""))
+            send_msg(self.sock, {"type": "file_write", "path": msg.get("path",""), "error": err})
+
+        elif t == "file_download":
+            self._file_send(msg.get("path",""))
+
+        elif t == "file_upload":
+            err = self._file_upload(msg.get("path",""), msg.get("data",""))
+            send_msg(self.sock, {"type": "file_upload", "path": msg.get("path",""), "error": err})
+
+    def _exec_python(self, code):
+        buf = io.StringIO()
+        import contextlib
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                exec(compile(code, "<remote>", "exec"), {})
+            return buf.getvalue() or "(нет вывода)"
+        except Exception:
+            return traceback.format_exc()
+
+    def _exec_cmd(self, command):
+        try:
+            r = subprocess.run(command, shell=True, capture_output=True,
+                               text=True, timeout=30)
+            return (r.stdout + r.stderr).strip() or "(нет вывода)"
+        except subprocess.TimeoutExpired:
+            return "[!] Таймаут 30 сек"
+        except Exception as e:
+            return f"[!] {e}"
+
+    def _file_list(self, path):
+        try:
+            items = []
+            for name in sorted(os.listdir(path)):
+                full = os.path.join(path, name)
+                try:
+                    is_dir = os.path.isdir(full)
+                    items.append({"name": name, "is_dir": is_dir,
+                                  "size": 0 if is_dir else os.path.getsize(full)})
+                except: pass
+            return items
+        except Exception as e:
+            return [{"name": f"[Ошибка: {e}]", "is_dir": False, "size": 0}]
+
+    def _file_read(self, path):
+        try:
+            with open(path, "rb") as f: raw = f.read()
+            try: return raw.decode("utf-8"), None
+            except: return base64.b64encode(raw).decode(), "binary"
+        except Exception as e:
+            return "", str(e)
+
+    def _file_write(self, path, data):
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f: f.write(data)
+        except Exception as e:
+            return str(e)
+
+    def _file_send(self, path):
+        try:
+            with open(path, "rb") as f: raw = f.read()
+            send_msg(self.sock, {"type": "file_download", "path": path,
+                                 "name": os.path.basename(path),
+                                 "data": base64.b64encode(raw).decode(), "error": None})
+        except Exception as e:
+            send_msg(self.sock, {"type": "file_download", "path": path, "error": str(e)})
+
+    def _file_upload(self, path, data_b64):
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+            with open(path, "wb") as f: f.write(base64.b64decode(data_b64))
+        except Exception as e:
+            return str(e)
+
+    def _stop_screen(self):
+        if self.screen_st: self.screen_st.stop(); self.screen_st = None
+
+    def _stop_camera(self):
+        if self.camera_st: self.camera_st.stop(); self.camera_st = None
+
+    def _stop_all(self):
+        self._stop_screen(); self._stop_camera()
+
+
+def main():
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind((HOST, PORT)); srv.listen(5)
+
+    # Показываем IP
+    import socket as _s
+    ips = _s.gethostbyname_ex(_s.gethostname())[2]
+    print("=" * 44)
+    print(f"  СЕРВЕР — {platform.node()}")
+    print(f"  Порт: {PORT}   Пароль: {PASSWORD}")
+    print(f"  IP: {', '.join(ips)}")
+    print("=" * 44)
 
     while True:
-        cmd = client.recv(1024).decode()
-        
-        # Выполнение CMD команд
-        if cmd.startswith("cmd"):
-            res = subprocess.check_output(cmd[4:], shell=True)
-            client.send(res if res else b"Done")
+        try:
+            conn, addr = srv.accept()
+            ClientHandler(conn, addr).start()
+        except KeyboardInterrupt:
+            print("\n[!] Остановлен"); break
 
-        # Чтение файла
-        elif cmd.startswith("read"):
-            with open(cmd[5:], "rb") as f:
-                client.send(f.read())
-
-        # Скриншот (Трансляция экрана упрощенно)
-        elif cmd == "screen":
-            img = ImageGrab.grab()
-            img.save("s.png")
-            with open("s.png", "rb") as f:
-                client.send(f.read())
-
-        # Камера (один кадр)
-        elif cmd == "cam":
-            cap = cv2.VideoCapture(0)
-            ret, frame = cap.read()
-            cv2.imwrite("c.jpg", frame)
-            cap.release()
-            with open("c.jpg", "rb") as f:
-                client.send(f.read())
-
-        # Python код
-        elif cmd.startswith("py"):
-            exec(cmd[3:])
-            client.send(b"Executed")
-
-start_client()
+if __name__ == "__main__":
+    main()
